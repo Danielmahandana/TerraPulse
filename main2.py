@@ -18,7 +18,7 @@ import io
 def load_data(uploaded_file):
     return pd.read_csv(uploaded_file)
 
-st.title("🌋 Seismic Event Detection & Classification")
+st.title("🌋 Welcome To TerraPulse Seismic Event Detection & Classification platform")
 st.sidebar.title("Settings")
 
 # File upload and dynamic file handling
