@@ -7,3 +7,4 @@ scikit-learn
 setuptools
 wheel
 plotly
+seaborn
