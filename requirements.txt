@@ -6,4 +6,4 @@ scipy
 scikit-learn
 setuptools
 wheel
-
+plotly
