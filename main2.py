@@ -1,26 +1,33 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.fftpack import fft
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
-import time
+from sklearn.metrics import classification_report, confusion_matrix
+import gc
 
-# Cache for performance optimization
-@st.cache_data
-def load_data(file):
+# Function to load data in batches
+def load_data_in_batches(file, batch_size=10000):
+    chunks = []
     try:
-        data = pd.read_csv(file)
-        return data
+        # Load data in chunks
+        for chunk in pd.read_csv(file, chunksize=batch_size):
+            chunks.append(chunk)
+            if len(chunks) > 0:
+                st.write(f"Loaded {len(chunks) * batch_size} rows...")
     except Exception as e:
         st.error(f"Error loading data: {e}")
         return None
+    
+    # Concatenate the chunks into a single DataFrame
+    data = pd.concat(chunks, axis=0)
+    return data
 
-def preprocess_data(data, apply_normalization=True):
+# Function to preprocess and normalize data
+def preprocess_data(data):
     if 'time_rel(sec)' not in data.columns or 'velocity(m/s)' not in data.columns:
         st.error("Required columns missing: 'time_rel(sec)', 'velocity(m/s)'")
         return None, None
@@ -28,20 +35,20 @@ def preprocess_data(data, apply_normalization=True):
     time = data['time_rel(sec)']
     signal = data['velocity(m/s)']
     
-    if apply_normalization:
-        signal = (signal - signal.mean()) / signal.std()
-    
+    # Normalize the signal
+    signal = (signal - signal.mean()) / signal.std()
     return time, signal
 
+# Plotting function (avoid replotting unnecessarily)
 def plot_time_series(time, signal, title):
     fig, ax = plt.subplots()
-    ax.plot(time, signal, label='Signal')
+    ax.plot(time, signal)
     ax.set_xlabel('Time (sec)')
     ax.set_ylabel('Velocity (m/s)')
     ax.set_title(title)
-    ax.legend()
     st.pyplot(fig)
 
+# Apply FFT and visualize it
 def apply_fft(signal):
     fft_result = fft(signal)
     fft_magnitude = np.abs(fft_result)
@@ -49,12 +56,14 @@ def apply_fft(signal):
 
 def plot_fft(fft_magnitude, sample_rate):
     freq = np.fft.fftfreq(len(fft_magnitude), d=1/sample_rate)
-    plt.plot(freq[:len(fft_magnitude)//2], fft_magnitude[:len(fft_magnitude)//2])
-    plt.xlabel('Frequency (Hz)')
-    plt.ylabel('Magnitude')
-    plt.title('FFT Spectrum')
-    st.pyplot(plt)
+    fig, ax = plt.subplots()
+    ax.plot(freq[:len(fft_magnitude)//2], fft_magnitude[:len(fft_magnitude)//2])
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('Magnitude')
+    ax.set_title('FFT Spectrum')
+    st.pyplot(fig)
 
+# Confusion matrix display
 def display_confusion_matrix(y_test, y_pred):
     cm = confusion_matrix(y_test, y_pred)
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
@@ -63,36 +72,33 @@ def display_confusion_matrix(y_test, y_pred):
     plt.xlabel('Predicted label')
     st.pyplot(plt)
 
-# Main app
+# Main app logic
 st.title("TerraPulse - Seismic Event Detection & Comparison")
-st.sidebar.title("Navigation")
+
+# Sidebar for navigation
 section = st.sidebar.selectbox("Select a section", ['Data Upload', 'Preprocessing & Visualization', 'Event Detection & Classification', 'Model Training & Tuning'])
 
-# Data upload and display
+# Data upload section
 if section == 'Data Upload':
     st.header("Upload your seismic datasets")
-    uploaded_files = st.file_uploader("Upload CSV files", accept_multiple_files=True, type=['csv'])
+    uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
 
-    if uploaded_files:
-        datasets = {}
-        for uploaded_file in uploaded_files:
-            data = load_data(uploaded_file)
-            if data is not None:
-                st.write(f"Preview of {uploaded_file.name}")
-                st.write(data.head())
-                datasets[uploaded_file.name] = data
-        if len(datasets) > 1:
-            st.write("Multiple datasets loaded. You can now compare them.")
+    if uploaded_file:
+        batch_size = st.number_input("Batch size (rows to load at a time)", min_value=1000, max_value=100000, value=10000)
+        data = load_data_in_batches(uploaded_file, batch_size=batch_size)
+        if data is not None:
+            st.write(f"Loaded data preview ({batch_size} rows per batch):")
+            st.write(data.head())
+            st.session_state['data'] = data
 
-# Data preprocessing and visualization
+# Preprocessing & Visualization section
 if section == 'Preprocessing & Visualization':
     st.header("Preprocess & Visualize Data")
 
-    if 'datasets' not in st.session_state:
-        st.warning("Upload data first in the Data Upload section.")
+    if 'data' not in st.session_state:
+        st.warning("Upload data first.")
     else:
-        selected_dataset = st.selectbox("Choose a dataset for preprocessing", list(st.session_state['datasets'].keys()))
-        data = st.session_state['datasets'][selected_dataset]
+        data = st.session_state['data']
         time, signal = preprocess_data(data)
         
         if time is not None and signal is not None:
@@ -100,24 +106,23 @@ if section == 'Preprocessing & Visualization':
             plot_time_series(time, signal, 'Seismic Signal')
 
             # Apply FFT and visualize frequency domain
-            fft_button = st.button("Show FFT Analysis")
-            if fft_button:
+            if st.button("Show FFT Analysis"):
                 fft_magnitude = apply_fft(signal)
-                plot_fft(fft_magnitude, sample_rate=1 / (time.iloc[1] - time.iloc[0]))
+                sample_rate = 1 / (time.iloc[1] - time.iloc[0])
+                plot_fft(fft_magnitude, sample_rate)
 
-# Event Detection & Classification
+# Event Detection & Classification section
 if section == 'Event Detection & Classification':
     st.header("Event Detection & Classification")
 
-    if 'datasets' not in st.session_state:
+    if 'data' not in st.session_state:
         st.warning("Upload and preprocess data first.")
     else:
-        selected_dataset = st.selectbox("Choose a dataset for classification", list(st.session_state['datasets'].keys()))
-        data = st.session_state['datasets'][selected_dataset]
+        data = st.session_state['data']
         time, signal = preprocess_data(data)
         
         if time is not None and signal is not None:
-            # Simple event detection logic: trigger when signal > threshold
+            # Detection logic
             threshold = st.slider("Detection threshold", min_value=0.1, max_value=5.0, value=1.0)
             detected_events = (signal > threshold).astype(int)
             st.write(f"Number of events detected: {detected_events.sum()}")
@@ -125,42 +130,40 @@ if section == 'Event Detection & Classification':
             st.subheader("Detected Events")
             st.line_chart(detected_events)
 
-# Machine Learning Model Training and Tuning
+# Model Training & Tuning section
 if section == 'Model Training & Tuning':
     st.header("Train & Tune a Machine Learning Model")
 
-    if 'datasets' not in st.session_state:
+    if 'data' not in st.session_state:
         st.warning("Upload and preprocess data first.")
     else:
-        selected_dataset = st.selectbox("Choose a dataset for model training", list(st.session_state['datasets'].keys()))
-        data = st.session_state['datasets'][selected_dataset]
+        data = st.session_state['data']
         time, signal = preprocess_data(data)
 
         if time is not None and signal is not None:
-            st.write("Select Features and Parameters")
             feature_cols = st.multiselect("Select features", ['Amplitude', 'FFT Peak', 'Signal Energy'])
-            target_col = st.selectbox("Select target column (if available)", data.columns)
-            
-            if st.button("Train Model"):
+            if len(feature_cols) == 0:
+                st.warning("Please select at least one feature.")
+            else:
                 X = data[feature_cols]
-                y = data[target_col]
+                y = st.session_state['data']['target']  # Placeholder for real target variable
 
-                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-                rf_model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
-                rf_model.fit(X_train, y_train)
+                if st.button("Train Model"):
+                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+                    rf_model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+                    rf_model.fit(X_train, y_train)
+                    
+                    y_pred = rf_model.predict(X_test)
+                    st.subheader("Classification Report")
+                    st.text(classification_report(y_test, y_pred))
 
-                y_pred = rf_model.predict(X_test)
-                st.subheader("Classification Report")
-                st.text(classification_report(y_test, y_pred))
+                    st.subheader("Confusion Matrix")
+                    display_confusion_matrix(y_test, y_pred)
 
-                st.subheader("Confusion Matrix")
-                display_confusion_matrix(y_test, y_pred)
+                    # Show feature importance
+                    st.subheader("Feature Importance")
+                    feature_importances = pd.Series(rf_model.feature_importances_, index=feature_cols)
+                    st.bar_chart(feature_importances)
 
-                st.subheader("Feature Importance")
-                feature_importances = pd.Series(rf_model.feature_importances_, index=feature_cols)
-                st.bar_chart(feature_importances)
-
-# Footer
-st.sidebar.write("---")
-st.sidebar.write("© 2024 TerraPulse Seismic Analysis")
-
+# Perform garbage collection to free memory
+gc.collect()
