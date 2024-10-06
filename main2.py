@@ -2,20 +2,50 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import plotly.express as px
-from scipy.signal import butter, filtfilt, spectrogram
+from scipy.signal import butter, filtfilt
 from scipy.fft import fft, fftfreq
-from sklearn.model_selection import KFold
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.svm import SVC
-from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.preprocessing import StandardScaler
-import seaborn as sns
 
 # Data loading with caching
 @st.cache_data
 def load_data(uploaded_file):
     return pd.read_csv(uploaded_file)
+
+def sta_lta_fixed(signal, short_window, long_window):
+    """Compute the STA/LTA ratio."""
+    sta = np.convolve(signal**2, np.ones(short_window), mode='valid')
+    lta = np.convolve(signal**2, np.ones(long_window), mode='valid')
+    
+    # Avoid division by zero
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sta_lta_ratio = np.where(lta != 0, sta / lta, 0)
+    
+    return sta_lta_ratio
+
+def butter_filter(filter_type, cutoff, fs, order=5, cutoff2=None):
+    nyq = 0.5 * fs
+    if filter_type == "Highpass":
+        normal_cutoff = cutoff / nyq
+        b, a = butter(order, normal_cutoff, btype='high', analog=False)
+    elif filter_type == "Lowpass":
+        normal_cutoff = cutoff / nyq
+        b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    elif filter_type == "Bandpass":
+        normal_cutoff = [cutoff / nyq, cutoff2 / nyq]
+        b, a = butter(order, normal_cutoff, btype='band', analog=False)
+    elif filter_type == "Notch":
+        # For notch, we design a bandstop filter around the cutoff frequency
+        bandwidth = 1.0  # 1 Hz bandwidth
+        low = (cutoff - bandwidth / 2) / nyq
+        high = (cutoff + bandwidth / 2) / nyq
+        normal_cutoff = [low, high]
+        b, a = butter(order, normal_cutoff, btype='bandstop', analog=False)
+    return b, a
+
+def apply_filter(data, filter_type, cutoff, fs, order=5, cutoff2=None):
+    b, a = butter_filter(filter_type, cutoff, fs, order, cutoff2)
+    y = filtfilt(b, a, data)
+    return y
 
 def main():
     # Title and Sidebar Setup
@@ -125,32 +155,6 @@ def main():
             cutoff_frequency_2 = None
             if filter_type in ["Bandpass", "Notch"]:
                 cutoff_frequency_2 = st.sidebar.slider("Second Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.5)
-
-            # Highpass filter function
-            def butter_filter(filter_type, cutoff, fs, order=5, cutoff2=None):
-                nyq = 0.5 * fs
-                if filter_type == "Highpass":
-                    normal_cutoff = cutoff / nyq
-                    b, a = butter(order, normal_cutoff, btype='high', analog=False)
-                elif filter_type == "Lowpass":
-                    normal_cutoff = cutoff / nyq
-                    b, a = butter(order, normal_cutoff, btype='low', analog=False)
-                elif filter_type == "Bandpass":
-                    normal_cutoff = [cutoff / nyq, cutoff2 / nyq]
-                    b, a = butter(order, normal_cutoff, btype='band', analog=False)
-                elif filter_type == "Notch":
-                    # For notch, we design a bandstop filter around the cutoff frequency
-                    bandwidth = 1.0  # 1 Hz bandwidth
-                    low = (cutoff - bandwidth / 2) / nyq
-                    high = (cutoff + bandwidth / 2) / nyq
-                    normal_cutoff = [low, high]
-                    b, a = butter(order, normal_cutoff, btype='bandstop', analog=False)
-                return b, a
-
-            def apply_filter(data, filter_type, cutoff, fs, order=5, cutoff2=None):
-                b, a = butter_filter(filter_type, cutoff, fs, order, cutoff2)
-                y = filtfilt(b, a, data)
-                return y
 
             # Sampling Rate
             try:
