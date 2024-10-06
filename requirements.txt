@@ -8,3 +8,5 @@ setuptools
 wheel
 plotly
 seaborn
+shap
+lime
