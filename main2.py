@@ -2,168 +2,224 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy.fftpack import fft
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
+import plotly.express as px
+from scipy.signal import butter, filtfilt, spectrogram
+from scipy.fft import fft, fftfreq
+from sklearn.model_selection import KFold
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.svm import SVC
 from sklearn.metrics import classification_report, confusion_matrix
-import gc
+from sklearn.preprocessing import StandardScaler
+import seaborn as sns
 
-# Function to load data in batches
-def load_data_in_batches(file, batch_size=10000):
-    chunks = []
-    try:
-        # Load data in chunks
-        for chunk in pd.read_csv(file, chunksize=batch_size):
-            chunks.append(chunk)
-            if len(chunks) > 0:
-                st.write(f"Loaded {len(chunks) * batch_size} rows...")
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        return None
-    
-    # Concatenate the chunks into a single DataFrame
-    data = pd.concat(chunks, axis=0)
-    return data
+# Data loading with caching
+@st.cache_data
+def load_data(uploaded_file):
+    return pd.read_csv(uploaded_file)
 
-# Function to preprocess and normalize data
-def preprocess_data(data):
-    if 'time_rel(sec)' not in data.columns or 'velocity(m/s)' not in data.columns:
-        st.error("Required columns missing: 'time_rel(sec)', 'velocity(m/s)'")
-        return None, None
-    
-    time = data['time_rel(sec)']
-    signal = data['velocity(m/s)']
-    
-    # Normalize the signal
-    signal = (signal - signal.mean()) / signal.std()
-    return time, signal
+def main():
+    # Title and Sidebar Setup
+    st.title("🌋 Seismic Event Detection & Classification")
+    st.sidebar.title("Settings")
 
-# Plotting function (avoid replotting unnecessarily)
-def plot_time_series(time, signal, title):
-    fig, ax = plt.subplots()
-    ax.plot(time, signal)
-    ax.set_xlabel('Time (sec)')
-    ax.set_ylabel('Velocity (m/s)')
-    ax.set_title(title)
-    st.pyplot(fig)
+    # File Upload
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload Seismic Data Files", type=["csv"], accept_multiple_files=True
+    )
 
-# Apply FFT and visualize it
-def apply_fft(signal):
-    fft_result = fft(signal)
-    fft_magnitude = np.abs(fft_result)
-    return fft_magnitude
+    if uploaded_files:
+        st.sidebar.success("Files uploaded successfully!")
+        datasets = [load_data(f) for f in uploaded_files]
+        file_options = [f.name for f in uploaded_files]
 
-def plot_fft(fft_magnitude, sample_rate):
-    freq = np.fft.fftfreq(len(fft_magnitude), d=1/sample_rate)
-    fig, ax = plt.subplots()
-    ax.plot(freq[:len(fft_magnitude)//2], fft_magnitude[:len(fft_magnitude)//2])
-    ax.set_xlabel('Frequency (Hz)')
-    ax.set_ylabel('Magnitude')
-    ax.set_title('FFT Spectrum')
-    st.pyplot(fig)
+        # Multi-file selection for comparison
+        selected_files = st.sidebar.multiselect(
+            "Select Files for Comparison", file_options, default=file_options
+        )
 
-# Confusion matrix display
-def display_confusion_matrix(y_test, y_pred):
-    cm = confusion_matrix(y_test, y_pred)
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-    plt.title('Confusion Matrix')
-    plt.ylabel('True label')
-    plt.xlabel('Predicted label')
-    st.pyplot(plt)
+        if not selected_files:
+            st.warning("Please select at least one file for analysis.")
+            return
 
-# Main app logic
-st.title("TerraPulse - Seismic Event Detection & Comparison")
+        # Model Selection
+        model_option = st.sidebar.selectbox("Select Model", ("RandomForest", "Gradient Boosting", "SVM"))
 
-# Sidebar for navigation
-section = st.sidebar.selectbox("Select a section", ['Data Upload', 'Preprocessing & Visualization', 'Event Detection & Classification', 'Model Training & Tuning'])
+        # Model Hyperparameters
+        st.sidebar.subheader("Model Hyperparameters")
+        if model_option == "RandomForest":
+            n_estimators = st.sidebar.slider("Number of Trees", 50, 300, 100)
+            max_depth = st.sidebar.slider("Max Depth", 3, 30, 10)
+        elif model_option == "Gradient Boosting":
+            n_estimators = st.sidebar.slider("Number of Boosting Stages", 50, 300, 100)
+            learning_rate = st.sidebar.slider("Learning Rate", 0.01, 0.5, 0.1)
+        elif model_option == "SVM":
+            C = st.sidebar.slider("C (Regularization)", 0.1, 10.0, 1.0)
+            kernel = st.sidebar.selectbox("Kernel", ("linear", "rbf"))
 
-# Data upload section
-if section == 'Data Upload':
-    st.header("Upload your seismic datasets")
-    uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
+        # Loop over selected files for comparison
+        for selected_file in selected_files:
+            # Retrieve the corresponding dataframe
+            data = next(df for i, df in enumerate(datasets) if file_options[i] == selected_file)
 
-    if uploaded_file:
-        batch_size = st.number_input("Batch size (rows to load at a time)", min_value=1000, max_value=100000, value=10000)
-        data = load_data_in_batches(uploaded_file, batch_size=batch_size)
-        if data is not None:
-            st.write(f"Loaded data preview ({batch_size} rows per batch):")
-            st.write(data.head())
-            st.session_state['data'] = data
+            st.header(f"**File: {selected_file}**")
+            st.subheader("Available Columns:")
+            st.write(data.columns.tolist())
 
-# Preprocessing & Visualization section
-if section == 'Preprocessing & Visualization':
-    st.header("Preprocess & Visualize Data")
+            # Automatically detect time and velocity columns
+            time_columns = [col for col in data.columns if 'time' in col.lower()]
+            velocity_columns = [col for col in data.columns if 'velocity' in col.lower()]
 
-    if 'data' not in st.session_state:
-        st.warning("Upload data first.")
-    else:
-        data = st.session_state['data']
-        time, signal = preprocess_data(data)
-        
-        if time is not None and signal is not None:
-            st.subheader("Time-Series Data")
-            plot_time_series(time, signal, 'Seismic Signal')
+            if not time_columns:
+                st.error("No time column found. Please ensure your CSV has a time column.")
+                continue
 
-            # Apply FFT and visualize frequency domain
-            if st.button("Show FFT Analysis"):
-                fft_magnitude = apply_fft(signal)
-                sample_rate = 1 / (time.iloc[1] - time.iloc[0])
-                plot_fft(fft_magnitude, sample_rate)
+            if not velocity_columns:
+                st.error("No velocity column found. Please ensure your CSV has a velocity column.")
+                continue
 
-# Event Detection & Classification section
-if section == 'Event Detection & Classification':
-    st.header("Event Detection & Classification")
+            # Display detected columns
+            st.subheader("Detected Columns:")
+            st.write(f"Time Columns: {time_columns}")
+            st.write(f"Velocity Columns: {velocity_columns}")
 
-    if 'data' not in st.session_state:
-        st.warning("Upload and preprocess data first.")
-    else:
-        data = st.session_state['data']
-        time, signal = preprocess_data(data)
-        
-        if time is not None and signal is not None:
-            # Detection logic
-            threshold = st.slider("Detection threshold", min_value=0.1, max_value=5.0, value=1.0)
-            detected_events = (signal > threshold).astype(int)
-            st.write(f"Number of events detected: {detected_events.sum()}")
+            # Allow user to select the correct columns if multiple are detected
+            time_col = st.selectbox(f"Select Time Column for {selected_file}", time_columns, index=0)
+            velocity_col = st.selectbox(f"Select Velocity Column for {selected_file}", velocity_columns, index=0)
 
-            st.subheader("Detected Events")
-            st.line_chart(detected_events)
-
-# Model Training & Tuning section
-if section == 'Model Training & Tuning':
-    st.header("Train & Tune a Machine Learning Model")
-
-    if 'data' not in st.session_state:
-        st.warning("Upload and preprocess data first.")
-    else:
-        data = st.session_state['data']
-        time, signal = preprocess_data(data)
-
-        if time is not None and signal is not None:
-            feature_cols = st.multiselect("Select features", ['Amplitude', 'FFT Peak', 'Signal Energy'])
-            if len(feature_cols) == 0:
-                st.warning("Please select at least one feature.")
+            # Handle absolute and relative time
+            if 'abs' in time_col.lower():
+                try:
+                    data[time_col] = pd.to_datetime(data[time_col], format='%Y-%m-%dT%H:%M:%S.%f')
+                    data['rel_time(sec)'] = (data[time_col] - data[time_col].iloc[0]).dt.total_seconds()
+                    time = data['rel_time(sec)']
+                    st.success("Converted absolute time to relative time.")
+                except Exception as e:
+                    st.error(f"Error converting absolute time: {e}")
+                    continue
+            elif 'rel' in time_col.lower():
+                time = data[time_col]
             else:
-                X = data[feature_cols]
-                y = st.session_state['data']['target']  # Placeholder for real target variable
+                st.error("Time column must contain 'abs' or 'rel' to indicate absolute or relative time.")
+                continue
 
-                if st.button("Train Model"):
-                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-                    rf_model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
-                    rf_model.fit(X_train, y_train)
-                    
-                    y_pred = rf_model.predict(X_test)
-                    st.subheader("Classification Report")
-                    st.text(classification_report(y_test, y_pred))
+            signal = data[velocity_col]
 
-                    st.subheader("Confusion Matrix")
-                    display_confusion_matrix(y_test, y_pred)
+            # Data Preview
+            with st.expander("🔍 Data Preview"):
+                st.write("First 5 rows of the seismic data:")
+                st.write(data.head())
 
-                    # Show feature importance
-                    st.subheader("Feature Importance")
-                    feature_importances = pd.Series(rf_model.feature_importances_, index=feature_cols)
-                    st.bar_chart(feature_importances)
+            # Normalization Option
+            normalize_option = st.sidebar.checkbox("Normalize/Standardize Signal")
+            if normalize_option:
+                scaler = StandardScaler()
+                signal = scaler.fit_transform(signal.values.reshape(-1, 1)).flatten()
+                st.info("Signal has been standardized.")
 
-# Perform garbage collection to free memory
-gc.collect()
+            # Filter Settings
+            filter_type = st.sidebar.selectbox("Select Filter Type", ("Highpass", "Lowpass", "Bandpass", "Notch"), index=0)
+            cutoff_frequency = st.sidebar.slider("Filter Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.1)
+            order = st.sidebar.slider("Filter Order", min_value=1, max_value=10, value=5)
+
+            # Additional filter parameters for bandpass and notch
+            cutoff_frequency_2 = None
+            if filter_type in ["Bandpass", "Notch"]:
+                cutoff_frequency_2 = st.sidebar.slider("Second Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.5)
+
+            # Highpass filter function
+            def butter_filter(filter_type, cutoff, fs, order=5, cutoff2=None):
+                nyq = 0.5 * fs
+                if filter_type == "Highpass":
+                    normal_cutoff = cutoff / nyq
+                    b, a = butter(order, normal_cutoff, btype='high', analog=False)
+                elif filter_type == "Lowpass":
+                    normal_cutoff = cutoff / nyq
+                    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+                elif filter_type == "Bandpass":
+                    normal_cutoff = [cutoff / nyq, cutoff2 / nyq]
+                    b, a = butter(order, normal_cutoff, btype='band', analog=False)
+                elif filter_type == "Notch":
+                    # For notch, we design a bandstop filter around the cutoff frequency
+                    bandwidth = 1.0  # 1 Hz bandwidth
+                    low = (cutoff - bandwidth / 2) / nyq
+                    high = (cutoff + bandwidth / 2) / nyq
+                    normal_cutoff = [low, high]
+                    b, a = butter(order, normal_cutoff, btype='bandstop', analog=False)
+                return b, a
+
+            def apply_filter(data, filter_type, cutoff, fs, order=5, cutoff2=None):
+                b, a = butter_filter(filter_type, cutoff, fs, order, cutoff2)
+                y = filtfilt(b, a, data)
+                return y
+
+            # Sampling Rate
+            try:
+                sampling_rate = 1.0 / (time.iloc[1] - time.iloc[0])
+            except Exception as e:
+                st.error(f"Error calculating sampling rate: {e}")
+                continue
+
+            # Apply filter
+            if filter_type in ["Bandpass", "Notch"]:
+                filtered_signal = apply_filter(signal, filter_type, cutoff_frequency, sampling_rate, order, cutoff_frequency_2)
+            else:
+                filtered_signal = apply_filter(signal, filter_type, cutoff_frequency, sampling_rate, order)
+
+            # Plot Raw and Filtered Signals
+            with st.expander("🔍 Seismic Signal (Raw vs. Filtered)"):
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(time, signal, label='Raw Signal')
+                ax.plot(time, filtered_signal, label='Filtered Signal', color='red')
+                ax.set_xlabel('Relative Time (seconds)')
+                ax.set_ylabel('Velocity (m/s)')
+                ax.set_title('Seismic Signal (Raw vs. Filtered)')
+                ax.legend()
+                st.pyplot(fig)
+
+            # STA/LTA Ratio Detection
+            short_window = int(0.5 * sampling_rate)
+            long_window = int(10 * sampling_rate)
+            sta_lta_ratio = sta_lta_fixed(filtered_signal, short_window, long_window)
+
+            # STA/LTA Threshold Slider
+            threshold = st.sidebar.slider("STA/LTA Detection Threshold", min_value=1.0, max_value=10.0, value=3.0)
+
+            # Find Seismic Events
+            seismic_events = time[:len(sta_lta_ratio)][sta_lta_ratio > threshold]
+
+            # STA/LTA Method Visualization
+            with st.expander("📈 Seismic Event Detection (STA/LTA Method)"):
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(time[:len(sta_lta_ratio)], sta_lta_ratio, label='STA/LTA Ratio')
+                ax.axhline(y=threshold, color='r', linestyle='--', label='Threshold')
+                ax.scatter(seismic_events, np.repeat(threshold, len(seismic_events)), color='orange', label='Detected Events')
+                ax.set_xlabel('Time (seconds)')
+                ax.set_ylabel('STA/LTA Ratio')
+                ax.set_title('STA/LTA Event Detection')
+                ax.legend()
+                st.pyplot(fig)
+
+            # FFT Analysis
+            n = len(filtered_signal)
+            fft_result = fft(filtered_signal)
+            freqs = fftfreq(n, 1/sampling_rate)
+
+            # FFT Plot
+            with st.expander("🔍 FFT Analysis"):
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(freqs[:n//2], np.abs(fft_result[:n//2]), color='blue')
+                ax.set_xlabel('Frequency (Hz)')
+                ax.set_ylabel('Amplitude')
+                ax.set_title('FFT of Filtered Signal')
+                st.pyplot(fig)
+
+            # Model Training
+            st.subheader("Model Training")
+            train_data = st.text_input("Input training data for classification (CSV format)")
+
+            if train_data:
+                # Handle classification training here (placeholder)
+                st.success("Training completed! (placeholder)")
+
+if __name__ == "__main__":
+    main()
