@@ -17,14 +17,6 @@ import json
 def load_data(uploaded_file):
     return pd.read_csv(uploaded_file)
 
-# Validate dataset
-def validate_data(data):
-    required_columns = ['time', 'velocity']
-    for col in required_columns:
-        if col not in data.columns:
-            return False, f"Column {col} is missing."
-    return True, "Data is valid."
-
 # STA/LTA algorithm
 def sta_lta_fixed(signal, short_window, long_window):
     sta = np.convolve(signal ** 2, np.ones(short_window), mode='same')
@@ -102,14 +94,25 @@ def main():
         for selected_file in selected_files:
             data = next(df for i, df in enumerate(datasets) if file_options[i] == selected_file)
 
-            valid, validation_message = validate_data(data)
-            if not valid:
-                st.error(validation_message)
+            st.header(f"**File: {selected_file}**")
+            st.subheader("Available Columns:")
+            st.write(data.columns.tolist())
+
+            # Auto-detect time and velocity columns
+            time_columns = [col for col in data.columns if 'time' in col.lower()]
+            velocity_columns = [col for col in data.columns if 'velocity' in col.lower()]
+
+            if not time_columns:
+                st.error("No time column found.")
                 continue
 
-            st.header(f"**File: {selected_file}**")
-            time_col = 'time'
-            velocity_col = 'velocity'
+            if not velocity_columns:
+                st.error("No velocity column found.")
+                continue
+
+            time_col = st.selectbox(f"Select Time Column for {selected_file}", time_columns, index=0)
+            velocity_col = st.selectbox(f"Select Velocity Column for {selected_file}", velocity_columns, index=0)
+
             time = data[time_col]
             signal = data[velocity_col]
 
@@ -183,16 +186,18 @@ def main():
                 ])
 
             # Cross-validation and model evaluation
-            kf = KFold(n_splits=5, shuffle=True)
-            for train_index, test_index in kf.split(X):
-                X_train, X_test = X[train_index], X[test_index]
-                y_train, y_test = y[train_index], y[test_index]
+            kf = KFold(n_splits=5)
+            for train_idx, test_idx in kf.split(X):
+                X_train, X_test = X[train_idx], X[test_idx]
+                y_train, y_test = y[train_idx], y[test_idx]
                 model.fit(X_train, y_train)
                 predictions = model.predict(X_test)
+                st.write(f"Confusion Matrix for {selected_file}:")
+                st.write(confusion_matrix(y_test, predictions))
+                st.write(f"Classification Report for {selected_file}:")
                 st.write(classification_report(y_test, predictions))
 
-            # GeoJSON export for mission readiness
-            st.write("Export Detected Events to GeoJSON")
+            # GeoJSON Export
             geojson_export = st.checkbox("Export to GeoJSON")
             if geojson_export:
                 geojson_data = {
@@ -204,7 +209,7 @@ def main():
                         "type": "Feature",
                         "geometry": {
                             "type": "Point",
-                            "coordinates": [event_time, 0]  # Dummy coordinates for now
+                            "coordinates": [event_time, 0]
                         },
                         "properties": {
                             "time": event_time
