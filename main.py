@@ -3,170 +3,157 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import plotly.express as px
-from scipy.signal import butter, filtfilt, spectrogram
-from scipy.fft import fft, fftfreq
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
+from scipy.signal import butter, filtfilt
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.svm import SVC
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
 
-st.title("🌋 Seismic Event Detection & Classification")
+# Load data with caching
+@st.cache_data
+def load_data(uploaded_file):
+    return pd.read_csv(uploaded_file)
 
-# Sidebar for inputs
-st.sidebar.title("Settings")
+def sta_lta_fixed(signal, short_window, long_window):
+    """Compute the STA/LTA ratio with short and long windows."""
+    sta = np.convolve(signal ** 2, np.ones(short_window), mode='same')
+    lta = np.convolve(signal ** 2, np.ones(long_window), mode='same')
+    # Avoid division by zero
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sta_lta_ratio = np.where(lta != 0, sta / lta, 0)
+    return sta_lta_ratio
 
-# File uploader
-uploaded_file = st.sidebar.file_uploader("Upload Seismic Data File", type=["csv"])
-
-if uploaded_file is not None:
-    st.sidebar.success("File uploaded successfully!")
-
-    # Read the uploaded CSV data
-    try:
-        seismic_data = pd.read_csv(uploaded_file)
-        st.sidebar.success("Data loaded successfully!")
-    except Exception as e:
-        st.sidebar.error(f"Error loading file: {str(e)}")
-        st.stop()
-
-    # Data preview
-    with st.expander("🔍 Data Preview"):
-        st.write("First 5 rows of the seismic data:")
-        st.write(seismic_data.head())
-
-    # Ensure required columns are present
-    if 'rel_time(sec)' not in seismic_data.columns or 'velocity(c/s)' not in seismic_data.columns:
-        st.error("The uploaded file must contain 'rel_time(sec)' and 'velocity(c/s)' columns.")
-        st.stop()
-
-    # Extract time and signal data
-    time = seismic_data['rel_time(sec)']
-    signal = seismic_data['velocity(c/s)']
-
-    # Allow user to adjust highpass filter settings
-    cutoff_frequency = st.sidebar.slider("Highpass Filter Cutoff Frequency (Hz)", min_value=0.01, max_value=1.0, value=0.1)
-    order = st.sidebar.slider("Filter Order", min_value=1, max_value=10, value=5)
-
-    # Highpass filter function
-    def butter_highpass(cutoff, fs, order=5):
-        nyq = 0.5 * fs
+def butter_filter(filter_type, cutoff, fs, order=5, cutoff2=None):
+    nyq = 0.5 * fs
+    if filter_type == "Highpass":
         normal_cutoff = cutoff / nyq
         b, a = butter(order, normal_cutoff, btype='high', analog=False)
-        return b, a
+    elif filter_type == "Lowpass":
+        normal_cutoff = cutoff / nyq
+        b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    elif filter_type == "Bandpass":
+        normal_cutoff = [cutoff / nyq, cutoff2 / nyq]
+        b, a = butter(order, normal_cutoff, btype='band', analog=False)
+    elif filter_type == "Notch":
+        bandwidth = 1.0  # 1 Hz bandwidth
+        low = (cutoff - bandwidth / 2) / nyq
+        high = (cutoff + bandwidth / 2) / nyq
+        normal_cutoff = [low, high]
+        b, a = butter(order, normal_cutoff, btype='bandstop', analog=False)
+    return b, a
 
-    def highpass_filter(data, cutoff, fs, order=5):
-        b, a = butter_highpass(cutoff, fs, order=order)
-        y = filtfilt(b, a, data)
-        return y
+def apply_filter(data, filter_type, cutoff, fs, order=5, cutoff2=None):
+    b, a = butter_filter(filter_type, cutoff, fs, order, cutoff2)
+    y = filtfilt(b, a, data)
+    return y
 
-    # Calculate sampling rate from time data
-    sampling_rate = 1.0 / (time[1] - time[0])
+def main():
+    st.title("🌋 Seismic Event Detection & Classification")
+    st.sidebar.title("Settings")
 
-    # Apply highpass filter to the signal
-    filtered_signal = highpass_filter(signal, cutoff_frequency, sampling_rate, order)
+    uploaded_files = st.sidebar.file_uploader("Upload Seismic Data Files", type=["csv"], accept_multiple_files=True)
 
-    # Plot raw and filtered signals
-    with st.expander("🔍 Seismic Signal (Raw vs. Filtered)"):
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(time, signal, label='Raw Signal')
-        ax.plot(time, filtered_signal, label='Filtered Signal', color='red')
-        ax.set_xlabel('Relative Time (seconds)')
-        ax.set_ylabel('Velocity (c/s)')
-        ax.set_title('Seismic Signal (Raw vs. Filtered)')
-        ax.legend()
-        st.pyplot(fig)
+    if uploaded_files:
+        st.sidebar.success("Files uploaded successfully!")
+        datasets = [load_data(f) for f in uploaded_files]
+        file_options = [f.name for f in uploaded_files]
 
-    # STA/LTA ratio detection method
-    def sta_lta_fixed(signal, short_window, long_window):
-        sta = np.cumsum(np.abs(signal)**2)
-        sta = (sta[short_window:] - sta[:-short_window]) / short_window
-        lta = (sta[long_window:] - sta[:-long_window]) / long_window
-        sta = sta[:len(lta)]  # Ensure same length
-        return sta / (lta + 1e-9)
+        selected_files = st.sidebar.multiselect("Select Files for Analysis", file_options, default=file_options)
+        if not selected_files:
+            st.warning("Please select at least one file for analysis.")
+            return
 
-    # STA/LTA Detection with windows based on the sampling rate
-    short_window = int(0.5 * sampling_rate)
-    long_window = int(10 * sampling_rate)
-    sta_lta_ratio = sta_lta_fixed(filtered_signal, short_window, long_window)
+        # Select model
+        model_option = st.sidebar.selectbox("Select Model", ("RandomForest", "Gradient Boosting", "SVM"))
 
-    # STA/LTA Threshold Slider
-    threshold = st.sidebar.slider("STA/LTA Detection Threshold", min_value=1.0, max_value=10.0, value=3.0)
+        # Model hyperparameters
+        st.sidebar.subheader("Model Hyperparameters")
+        if model_option == "RandomForest":
+            n_estimators = st.sidebar.slider("Number of Trees", 50, 300, 100)
+            max_depth = st.sidebar.slider("Max Depth", 3, 30, 10)
+        elif model_option == "Gradient Boosting":
+            n_estimators = st.sidebar.slider("Number of Boosting Stages", 50, 300, 100)
+            learning_rate = st.sidebar.slider("Learning Rate", 0.01, 0.5, 0.1)
+        elif model_option == "SVM":
+            C = st.sidebar.slider("C (Regularization)", 0.1, 10.0, 1.0)
+            kernel = st.sidebar.selectbox("Kernel", ("linear", "rbf"))
 
-    # Detect seismic events where STA/LTA ratio exceeds the threshold
-    seismic_events = time[:len(sta_lta_ratio)][sta_lta_ratio > threshold]
+        for selected_file in selected_files:
+            data = next(df for i, df in enumerate(datasets) if file_options[i] == selected_file)
 
-    # Plot STA/LTA ratio and detected events
-    with st.expander("📈 Seismic Event Detection (STA/LTA Method)"):
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(time[:len(sta_lta_ratio)], sta_lta_ratio, label='STA/LTA Ratio')
-        ax.axhline(y=threshold, color='r', linestyle='--', label='Threshold')
-        ax.scatter(seismic_events, np.ones_like(seismic_events) * threshold, color='red', marker='x', label='Detected Events')
-        ax.set_xlabel('Relative Time (seconds)')
-        ax.set_ylabel('STA/LTA Ratio')
-        ax.set_title('Seismic Event Detection')
-        ax.legend()
-        st.pyplot(fig)
+            st.header(f"**File: {selected_file}**")
+            st.subheader("Available Columns:")
+            st.write(data.columns.tolist())
 
-    st.write("### Detected seismic event times (seconds):")
-    st.write(seismic_events)
+            # Auto-detect time and velocity columns
+            time_columns = [col for col in data.columns if 'time' in col.lower()]
+            velocity_columns = [col for col in data.columns if 'velocity' in col.lower()]
 
-    # FFT Analysis of the filtered signal
-    with st.expander("🔍 FFT of Filtered Seismic Signal"):
-        N = len(filtered_signal)
-        T = 1 / sampling_rate
-        yf = fft(filtered_signal)
-        xf = fftfreq(N, T)[:N // 2]
-        fig = px.line(x=xf, y=2.0 / N * np.abs(yf[0:N // 2]), title="FFT of Filtered Seismic Signal")
-        fig.update_layout(xaxis_title="Frequency (Hz)", yaxis_title="Amplitude")
-        st.plotly_chart(fig)
+            if not time_columns:
+                st.error("No time column found.")
+                continue
 
-    # Spectrogram of the filtered signal
-    with st.expander("🔍 Spectrogram of Filtered Seismic Signal"):
-        frequencies, times, Sxx = spectrogram(filtered_signal, fs=sampling_rate)
-        fig = px.imshow(10 * np.log10(Sxx), x=times, y=frequencies, origin='lower', aspect='auto', color_continuous_scale='Viridis')
-        fig.update_layout(title="Spectrogram of Filtered Seismic Signal", xaxis_title="Time (seconds)", yaxis_title="Frequency (Hz)")
-        fig.update_yaxes(range=[0, 10])
-        st.plotly_chart(fig)
+            if not velocity_columns:
+                st.error("No velocity column found.")
+                continue
 
-    # Event properties extraction for classification
-    st.write("### Event Properties for Classification")
-    event_properties = []
-    for event_time in seismic_events:
-        index = np.where(np.isclose(time, event_time, atol=1e-3))[0]
-        if len(index) > 0:
-            idx = index[0]
-            amplitude = np.max(np.abs(filtered_signal[idx - short_window:idx + short_window]))
-            duration = len(sta_lta_ratio[idx - short_window:idx + short_window]) / sampling_rate
-            event_properties.append((event_time, amplitude, duration))
+            time_col = st.selectbox(f"Select Time Column for {selected_file}", time_columns, index=0)
+            velocity_col = st.selectbox(f"Select Velocity Column for {selected_file}", velocity_columns, index=0)
 
-    # Display event properties in a DataFrame
-    event_properties_df = pd.DataFrame(event_properties, columns=['Time (s)', 'Amplitude', 'Duration (s)'])
-    st.write(event_properties_df)
+            time = data[time_col]
+            signal = data[velocity_col]
 
-    # Download button for event properties
-    st.download_button(
-        label="Download Event Data as CSV",
-        data=event_properties_df.to_csv(index=False),
-        file_name='seismic_event_properties.csv',
-        mime='text/csv',
-    )
+            if st.sidebar.checkbox("Normalize/Standardize Signal"):
+                scaler = StandardScaler()
+                signal = scaler.fit_transform(signal.values.reshape(-1, 1)).flatten()
+                st.info("Signal has been standardized.")
 
-    # Classification of seismic events
-    if len(event_properties) > 0:
-        features = np.array(event_properties_df[['Amplitude', 'Duration (s)']])
-        labels = ["seismic_event"] * len(features)
+            # Filter setup
+            filter_type = st.sidebar.selectbox("Select Filter Type", ("Highpass", "Lowpass", "Bandpass", "Notch"))
+            cutoff_frequency = st.sidebar.slider("Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.1)
+            order = st.sidebar.slider("Filter Order", min_value=1, max_value=10, value=5)
 
-        # Split into training and testing sets
-        X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.3, random_state=42)
+            if filter_type in ["Bandpass", "Notch"]:
+                cutoff_frequency_2 = st.sidebar.slider("Second Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.5)
 
-        # RandomForestClassifier for classification
-        clf = RandomForestClassifier()
-        clf.fit(X_train, y_train)
+            # Apply filter
+            sampling_rate = 1.0 / (time.iloc[1] - time.iloc[0])
+            if filter_type in ["Bandpass", "Notch"]:
+                filtered_signal = apply_filter(signal, filter_type, cutoff_frequency, sampling_rate, order, cutoff_frequency_2)
+            else:
+                filtered_signal = apply_filter(signal, filter_type, cutoff_frequency, sampling_rate, order)
 
-        y_pred = clf.predict(X_test)
+            # Plot raw and filtered signals
+            with st.expander("Seismic Signal (Raw vs. Filtered)"):
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(time, signal, label="Raw Signal")
+                ax.plot(time, filtered_signal, label="Filtered Signal", color="red")
+                ax.set_xlabel("Time (seconds)")
+                ax.set_ylabel("Velocity (m/s)")
+                ax.legend()
+                st.pyplot(fig)
 
-        # Display classification report
-        st.write("### Classification Report")
-        st.text(classification_report(y_test, y_pred))
+            # STA/LTA Event Detection
+            short_window = int(0.5 * sampling_rate)
+            long_window = int(10 * sampling_rate)
+            sta_lta_ratio = sta_lta_fixed(filtered_signal, short_window, long_window)
 
-else:
-    st.warning("Please upload a CSV file with seismic data.")
+            threshold = st.sidebar.slider("STA/LTA Detection Threshold", 1.0, 10.0, 3.0)
+            seismic_events = time[sta_lta_ratio > threshold]
+
+            # Plot STA/LTA detection
+            with st.expander("STA/LTA Event Detection"):
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(time, sta_lta_ratio, label="STA/LTA Ratio", color="orange")
+                ax.axhline(y=threshold, color="red", linestyle="--", label="Threshold")
+                ax.scatter(seismic_events, [threshold] * len(seismic_events), color="green", label="Detected Events")
+                ax.legend()
+                st.pyplot(fig)
+
+            st.write("Detected Seismic Event Times (seconds):")
+            st.write(seismic_events)
+
+if __name__ == "__main__":
+    main()
