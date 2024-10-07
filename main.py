@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
-from scipy.signal import butter, filtfilt
+from scipy import signal
 from scipy.fft import fft, fftfreq
 from sklearn.preprocessing import StandardScaler
 
@@ -17,7 +17,6 @@ def sta_lta_fixed(signal, short_window, long_window):
     sta = np.convolve(signal**2, np.ones(short_window), mode='same') / short_window
     lta = np.convolve(signal**2, np.ones(long_window), mode='same') / long_window
     
-    # Avoid division by zero
     with np.errstate(divide='ignore', invalid='ignore'):
         sta_lta_ratio = np.where(lta != 0, sta / lta, 0)
     
@@ -27,33 +26,55 @@ def butter_filter(filter_type, cutoff, fs, order=5, cutoff2=None):
     nyq = 0.5 * fs
     if filter_type == "Highpass":
         normal_cutoff = cutoff / nyq
-        b, a = butter(order, normal_cutoff, btype='high', analog=False)
+        b, a = signal.butter(order, normal_cutoff, btype='high', analog=False)
     elif filter_type == "Lowpass":
         normal_cutoff = cutoff / nyq
-        b, a = butter(order, normal_cutoff, btype='low', analog=False)
+        b, a = signal.butter(order, normal_cutoff, btype='low', analog=False)
     elif filter_type == "Bandpass":
         normal_cutoff = [cutoff / nyq, cutoff2 / nyq]
-        b, a = butter(order, normal_cutoff, btype='band', analog=False)
+        b, a = signal.butter(order, normal_cutoff, btype='band', analog=False)
     elif filter_type == "Notch":
-        bandwidth = 1.0  # 1 Hz bandwidth
+        bandwidth = 1.0
         low = (cutoff - bandwidth / 2) / nyq
         high = (cutoff + bandwidth / 2) / nyq
         normal_cutoff = [low, high]
-        b, a = butter(order, normal_cutoff, btype='bandstop', analog=False)
+        b, a = signal.butter(order, normal_cutoff, btype='bandstop', analog=False)
     return b, a
 
 def apply_filter(data, filter_type, cutoff, fs, order=5, cutoff2=None):
     b, a = butter_filter(filter_type, cutoff, fs, order, cutoff2)
-    y = filtfilt(b, a, data)
+    y = signal.filtfilt(b, a, data)
     return y
 
-def plot_seismic_events(time, signal, filtered_signal, sta_lta_ratio, threshold, seismic_events):
+def characterize_event(signal, event_start, event_end, sampling_rate):
+    event_signal = signal[event_start:event_end]
+    
+    duration = (event_end - event_start) / sampling_rate
+    peak_amplitude = np.max(np.abs(event_signal))
+    freqs, psd = signal.welch(event_signal, fs=sampling_rate, nperseg=min(256, len(event_signal)))
+    dominant_freq = freqs[np.argmax(psd)]
+    
+    return {
+        "duration": duration,
+        "peak_amplitude": peak_amplitude,
+        "dominant_frequency": dominant_freq
+    }
+
+def plot_seismic_events(time, signal, filtered_signal, sta_lta_ratio, threshold, seismic_events, plot_options):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=time, y=signal, name='Raw Signal', line=dict(color='blue')))
-    fig.add_trace(go.Scatter(x=time, y=filtered_signal, name='Filtered Signal', line=dict(color='red')))
-    fig.add_trace(go.Scatter(x=time, y=sta_lta_ratio, name='STA/LTA Ratio', line=dict(color='orange'), yaxis='y2'))
-    fig.add_trace(go.Scatter(x=seismic_events, y=[threshold]*len(seismic_events), mode='markers', 
-                             name='Detected Events', marker=dict(color='green', size=10)))
+    
+    if plot_options['raw_signal']:
+        fig.add_trace(go.Scatter(x=time, y=signal, name='Raw Signal', line=dict(color='blue')))
+    
+    if plot_options['filtered_signal']:
+        fig.add_trace(go.Scatter(x=time, y=filtered_signal, name='Filtered Signal', line=dict(color='red')))
+    
+    if plot_options['sta_lta_ratio']:
+        fig.add_trace(go.Scatter(x=time, y=sta_lta_ratio, name='STA/LTA Ratio', line=dict(color='orange'), yaxis='y2'))
+    
+    if plot_options['detected_events']:
+        fig.add_trace(go.Scatter(x=seismic_events, y=[threshold]*len(seismic_events), mode='markers', 
+                                 name='Detected Events', marker=dict(color='green', size=10)))
 
     fig.update_layout(
         title='Seismic Signal Analysis and Event Detection',
@@ -86,6 +107,25 @@ def main():
         if not selected_files:
             st.warning("Please select at least one file for analysis.")
             return
+
+        # Customizable Visualization
+        st.sidebar.subheader("Plot Options")
+        plot_options = {
+            'raw_signal': st.sidebar.checkbox("Show Raw Signal", value=True),
+            'filtered_signal': st.sidebar.checkbox("Show Filtered Signal", value=True),
+            'sta_lta_ratio': st.sidebar.checkbox("Show STA/LTA Ratio", value=True),
+            'detected_events': st.sidebar.checkbox("Show Detected Events", value=True)
+        }
+
+        filter_type = st.sidebar.selectbox("Select Filter Type", ("Highpass", "Lowpass", "Bandpass", "Notch"), index=0)
+        cutoff_frequency = st.sidebar.slider("Filter Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.1)
+        order = st.sidebar.slider("Filter Order", min_value=1, max_value=10, value=5)
+
+        cutoff_frequency_2 = None
+        if filter_type in ["Bandpass", "Notch"]:
+            cutoff_frequency_2 = st.sidebar.slider("Second Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.5)
+
+        normalize_option = st.sidebar.checkbox("Normalize Signal")
 
         for selected_file in selected_files:
             data = next(df for i, df in enumerate(datasets) if file_options[i] == selected_file)
@@ -122,19 +162,10 @@ def main():
             with st.expander("🔍 Data Preview"):
                 st.write(data.head())
 
-            normalize_option = st.sidebar.checkbox("Normalize Signal")
             if normalize_option:
                 scaler = StandardScaler()
                 signal = scaler.fit_transform(signal.values.reshape(-1, 1)).flatten()
                 st.info("Signal has been normalized.")
-
-            filter_type = st.sidebar.selectbox("Select Filter Type", ("Highpass", "Lowpass", "Bandpass", "Notch"), index=0)
-            cutoff_frequency = st.sidebar.slider("Filter Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.1)
-            order = st.sidebar.slider("Filter Order", min_value=1, max_value=10, value=5)
-
-            cutoff_frequency_2 = None
-            if filter_type in ["Bandpass", "Notch"]:
-                cutoff_frequency_2 = st.sidebar.slider("Second Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.5)
 
             try:
                 sampling_rate = 1.0 / (time.iloc[1] - time.iloc[0])
@@ -152,7 +183,7 @@ def main():
 
             seismic_events = time[sta_lta_ratio > threshold]
 
-            fig = plot_seismic_events(time, signal, filtered_signal, sta_lta_ratio, threshold, seismic_events)
+            fig = plot_seismic_events(time, signal, filtered_signal, sta_lta_ratio, threshold, seismic_events, plot_options)
             st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("Detected Seismic Events")
@@ -160,18 +191,18 @@ def main():
             st.write("Event timestamps:")
             st.write(seismic_events)
 
-            # FFT Analysis
-            with st.expander("📊 Frequency Analysis (FFT)"):
-                n = len(filtered_signal)
-                fft_result = fft(filtered_signal)
-                freq = fftfreq(n, 1 / sampling_rate)
-                
-                plt.figure(figsize=(10, 6))
-                plt.plot(freq[:n//2], np.abs(fft_result[:n//2]))
-                plt.xlabel('Frequency (Hz)')
-                plt.ylabel('Magnitude')
-                plt.title('Frequency Spectrum of Filtered Signal')
-                st.pyplot(plt)
+            # Event Characterization
+            event_characteristics = []
+            for event_time in seismic_events:
+                event_start = np.argmin(np.abs(time - event_time))
+                event_end = min(event_start + int(10 * sampling_rate), len(signal))  # 10-second window or end of signal
+                characteristics = characterize_event(filtered_signal, event_start, event_end, sampling_rate)
+                event_characteristics.append(characteristics)
+
+            # Display event characteristics
+            st.subheader("Event Characteristics")
+            event_df = pd.DataFrame(event_characteristics)
+            st.write(event_df)
 
 if __name__ == "__main__":
     main()
