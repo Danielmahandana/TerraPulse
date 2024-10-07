@@ -5,17 +5,12 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 from scipy.signal import butter, filtfilt
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import KFold
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.svm import SVC
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropout
 import json
-
-# Load data with caching
-@st.cache_data
-def load_data(uploaded_file):
-    return pd.read_csv(uploaded_file)
 
 # STA/LTA ratio calculation
 def sta_lta_fixed(signal, short_window, long_window):
@@ -52,51 +47,49 @@ def apply_filter(data, filter_type, cutoff, fs, order=5, cutoff2=None):
     y = filtfilt(b, a, data)
     return y
 
-# Feature extraction (updated to handle FFT values)
+# Feature extraction
 def extract_features(signal):
-    fft_values = np.fft.fft(signal).real[:len(signal) // 2]  # Real part of FFT
+    fft_values = np.fft.fft(signal).real[:len(signal) // 2]
     features = {
         'mean': np.mean(signal),
         'std_dev': np.std(signal),
         'max_amplitude': np.max(signal),
     }
 
-    # Adding FFT values as separate columns
     for i, fft_value in enumerate(fft_values):
         features[f'fft_{i}'] = fft_value
 
-    return pd.DataFrame([features])  # Wrap dictionary in a list to create a single-row DataFrame
+    return pd.DataFrame([features])
+
+# CNN Model
+def build_cnn(input_shape):
+    model = Sequential()
+    model.add(Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=input_shape))
+    model.add(MaxPooling1D(pool_size=2))
+    model.add(Conv1D(filters=128, kernel_size=3, activation='relu'))
+    model.add(MaxPooling1D(pool_size=2))
+    model.add(Flatten())
+    model.add(Dense(128, activation='relu'))
+    model.add(Dropout(0.5))
+    model.add(Dense(1, activation='sigmoid'))  # Binary classification (event/no event)
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
 
 def main():
-    st.title("🌋 Seismic Event Detection & Classification (NASA Ready)")
+    st.title("🌋 Seismic Event Detection & Classification")
     st.sidebar.title("Settings")
 
     uploaded_files = st.sidebar.file_uploader("Upload Seismic Data Files", type=["csv"], accept_multiple_files=True)
 
     if uploaded_files:
         st.sidebar.success("Files uploaded successfully!")
-        datasets = [load_data(f) for f in uploaded_files]
+        datasets = [pd.read_csv(f) for f in uploaded_files]
         file_options = [f.name for f in uploaded_files]
 
         selected_files = st.sidebar.multiselect("Select Files for Analysis", file_options, default=file_options)
         if not selected_files:
             st.warning("Please select at least one file for analysis.")
             return
-
-        # Select model
-        model_option = st.sidebar.selectbox("Select Model", ("RandomForest", "Gradient Boosting", "SVM"))
-
-        # Model hyperparameters
-        st.sidebar.subheader("Model Hyperparameters")
-        if model_option == "RandomForest":
-            n_estimators = st.sidebar.slider("Number of Trees", 50, 300, 100)
-            max_depth = st.sidebar.slider("Max Depth", 3, 30, 10)
-        elif model_option == "Gradient Boosting":
-            n_estimators = st.sidebar.slider("Number of Boosting Stages", 50, 300, 100)
-            learning_rate = st.sidebar.slider("Learning Rate", 0.01, 0.5, 0.1)
-        elif model_option == "SVM":
-            C = st.sidebar.slider("C (Regularization)", 0.1, 10.0, 1.0)
-            kernel = st.sidebar.selectbox("Kernel", ("linear", "rbf"))
 
         for selected_file in selected_files:
             data = next(df for i, df in enumerate(datasets) if file_options[i] == selected_file)
@@ -105,7 +98,6 @@ def main():
             st.subheader("Available Columns:")
             st.write(data.columns.tolist())
 
-            # Auto-detect time and velocity columns
             time_columns = [col for col in data.columns if 'time' in col.lower()]
             velocity_columns = [col for col in data.columns if 'velocity' in col.lower()]
 
@@ -128,7 +120,6 @@ def main():
                 signal = scaler.fit_transform(signal.values.reshape(-1, 1)).flatten()
                 st.info("Signal has been standardized.")
 
-            # Filter setup
             filter_type = st.sidebar.selectbox("Select Filter Type", ("Highpass", "Lowpass", "Bandpass", "Notch"))
             cutoff_frequency = st.sidebar.slider("Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.1)
             order = st.sidebar.slider("Filter Order", min_value=1, max_value=10, value=5)
@@ -136,14 +127,12 @@ def main():
             if filter_type in ["Bandpass", "Notch"]:
                 cutoff_frequency_2 = st.sidebar.slider("Second Cutoff Frequency (Hz)", min_value=0.01, max_value=50.0, value=0.5)
 
-            # Apply filter
             sampling_rate = 1.0 / (time.iloc[1] - time.iloc[0])
             if filter_type in ["Bandpass", "Notch"]:
                 filtered_signal = apply_filter(signal, filter_type, cutoff_frequency, sampling_rate, order, cutoff_frequency_2)
             else:
                 filtered_signal = apply_filter(signal, filter_type, cutoff_frequency, sampling_rate, order)
 
-            # Plot raw and filtered signals
             with st.expander("Seismic Signal (Raw vs. Filtered)"):
                 fig, ax = plt.subplots(figsize=(10, 6))
                 ax.plot(time, signal, label="Raw Signal")
@@ -153,7 +142,6 @@ def main():
                 ax.legend()
                 st.pyplot(fig)
 
-            # STA/LTA Event Detection
             short_window = int(0.5 * sampling_rate)
             long_window = int(10 * sampling_rate)
             sta_lta_ratio = sta_lta_fixed(filtered_signal, short_window, long_window)
@@ -161,7 +149,6 @@ def main():
             threshold = st.sidebar.slider("STA/LTA Detection Threshold", 1.0, 10.0, 3.0)
             seismic_events = time[sta_lta_ratio > threshold]
 
-            # Plot STA/LTA detection
             with st.expander("STA/LTA Event Detection"):
                 fig, ax = plt.subplots(figsize=(10, 6))
                 ax.plot(time, sta_lta_ratio, label="STA/LTA Ratio", color="orange")
@@ -173,45 +160,28 @@ def main():
             st.write("Detected Seismic Event Times (seconds):")
             st.write(seismic_events)
 
-            # Feature extraction
             st.write("Feature Extraction:")
             features = extract_features(filtered_signal)
             st.write(features)
 
-            # Prepare data for ML model
-            X = features.values
-            y = (sta_lta_ratio > threshold).astype(int)  # Binary labels for event/no event
+            X = np.array(filtered_signal).reshape(-1, 1)
+            y = (sta_lta_ratio > threshold).astype(int)
 
-            # Train model
-            if model_option == "RandomForest":
-                model = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth)
-            elif model_option == "Gradient Boosting":
-                model = GradientBoostingClassifier(n_estimators=n_estimators, learning_rate=learning_rate)
-            elif model_option == "SVM":
-                model = SVC(C=C, kernel=kernel)
+            X_train, X_test = X[:int(0.8*len(X))], X[int(0.8*len(X)):]
+            y_train, y_test = y[:int(0.8*len(y))], y[int(0.8*len(y)):]
 
-            # KFold Cross-validation
-            kf = KFold(n_splits=5)
-            for train_idx, test_idx in kf.split(X):
-                X_train, X_test = X[train_idx], X[test_idx]
-                y_train, y_test = y[train_idx], y[test_idx]
-                model.fit(X_train, y_train)
-                y_pred = model.predict(X_test)
-                st.write(classification_report(y_test, y_pred))
+            model = build_cnn((X_train.shape[1], 1))
+
+            history = model.fit(X_train, y_train, epochs=10, batch_size=32, validation_data=(X_test, y_test))
+
+            y_pred = (model.predict(X_test) > 0.5).astype(int)
+            st.write(classification_report(y_test, y_pred))
 
             st.write("Confusion Matrix:")
             cm = confusion_matrix(y_test, y_pred)
             fig, ax = plt.subplots()
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
             st.pyplot(fig)
-
-            # GeoJSON output download (as example for future extension)
-            geojson_output = {
-                "type": "FeatureCollection",
-                "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [0, 0]}, "properties": {}}]
-            }
-            geojson_str = json.dumps(geojson_output)
-            st.download_button("Download GeoJSON", geojson_str, file_name="seismic_events.geojson", mime="application/json")
 
 if __name__ == "__main__":
     main()
