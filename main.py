@@ -52,29 +52,40 @@ def main():
     # File uploader
     uploaded_file = st.file_uploader("Upload your seismic data CSV file", type="csv")
 
-    if uploaded_file:
-        data = pd.read_csv(uploaded_file)
+if uploaded_files:
+        st.sidebar.success("Files uploaded successfully!")
+        datasets = [pd.read_csv(f) for f in uploaded_files]
+        file_options = [f.name for f in uploaded_files]
 
-        # Allow the user to select the columns
-        time_col = st.selectbox("Select the Time Column", data.columns)
-        signal_col = st.selectbox("Select the Signal Column", data.columns)
-
-        # Check if time column is correctly selected
-        if 'rel_time' not in data.columns:
-            st.warning("Warning: The 'rel_time' column is not selected or doesn't exist. Please ensure that your data has a valid time column or select an alternative.")
+        selected_files = st.sidebar.multiselect("Select Files for Analysis", file_options, default=file_options)
+        if not selected_files:
+            st.warning("Please select at least one file for analysis.")
             return
 
-        time = data[time_col]
-        signal = data[signal_col]
+        for selected_file in selected_files:
+            data = next(df for i, df in enumerate(datasets) if file_options[i] == selected_file)
 
-        try:
-            # Convert time column to numeric
-            time = pd.to_numeric(time, errors='coerce')
-            # Ensure that the time values are valid
-            sampling_rate = 1.0 / (time.iloc[1] - time.iloc[0])
-        except Exception as e:
-            st.error(f"Error in processing time column: {str(e)}")
-            return
+            st.header(f"**File: {selected_file}**")
+            st.subheader("Available Columns:")
+            st.write(data.columns.tolist())
+
+            time_columns = [col for col in data.columns if 'time' in col.lower()]
+            velocity_columns = [col for col in data.columns if 'velocity' in col.lower()]
+
+            if not time_columns:
+                st.error("No time column found.")
+                continue
+
+            if not velocity_columns:
+                st.error("No velocity column found.")
+                continue
+
+            time_col = st.selectbox(f"Select Time Column for {selected_file}", time_columns, index=0)
+            velocity_col = st.selectbox(f"Select Velocity Column for {selected_file}", velocity_columns, index=0)
+
+            time = data[time_col]
+            signal = data[velocity_col]
+
 
         st.write("## Original Signal")
         st.line_chart(signal)
