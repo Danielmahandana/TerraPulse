@@ -10,3 +10,4 @@ plotly
 seaborn
 shap
 lime
+tensorflow
